@@ -1,0 +1,251 @@
+name: Nightly Build (Latest Tools)
+
+# Rebuild :latest with newest tool versions
+on:
+  schedule:
+    - cron: '0 2 * * *'  # Daily at 2 AM UTC
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create a nightly release'
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-latest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write    # For creating releases
+      packages: write    # For pushing images
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for changelog
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get latest tool versions
+        id: versions
+        run: |
+          # Build date
+          BUILD_DATE=$(date -u +"%Y-%m-%d")
+          BUILD_TIMESTAMP=$(date -u +"%Y%m%d%H%M%S")
+          echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
+          echo "build_timestamp=$BUILD_TIMESTAMP" >> $GITHUB_OUTPUT
+          
+          # Get latest Trivy version + release date
+          TRIVY_DATA=$(curl -s https://api.github.com/repos/aquasecurity/trivy/releases/latest)
+          TRIVY_VERSION=$(echo "$TRIVY_DATA" | jq -r '.tag_name' | sed 's/v//')
+          TRIVY_DATE=$(echo "$TRIVY_DATA" | jq -r '.published_at' | cut -d'T' -f1)
+          TRIVY_URL=$(echo "$TRIVY_DATA" | jq -r '.html_url')
+          echo "trivy_version=$TRIVY_VERSION" >> $GITHUB_OUTPUT
+          echo "trivy_date=$TRIVY_DATE" >> $GITHUB_OUTPUT
+          echo "trivy_url=$TRIVY_URL" >> $GITHUB_OUTPUT
+          
+          # Get latest Malcontent version + release date
+          MALC_DATA=$(curl -s https://api.github.com/repos/chainguard-dev/malcontent/releases/latest)
+          MALC_VERSION=$(echo "$MALC_DATA" | jq -r '.tag_name' | sed 's/v//')
+          MALC_DATE=$(echo "$MALC_DATA" | jq -r '.published_at' | cut -d'T' -f1)
+          MALC_URL=$(echo "$MALC_DATA" | jq -r '.html_url')
+          echo "malcontent_version=$MALC_VERSION" >> $GITHUB_OUTPUT
+          echo "malcontent_date=$MALC_DATE" >> $GITHUB_OUTPUT
+          echo "malcontent_url=$MALC_URL" >> $GITHUB_OUTPUT
+          
+          # Get latest Magika version from PyPI
+          MAGIKA_DATA=$(curl -s https://pypi.org/pypi/magika/json)
+          MAGIKA_VERSION=$(echo "$MAGIKA_DATA" | jq -r '.info.version')
+          echo "magika_version=$MAGIKA_VERSION" >> $GITHUB_OUTPUT
+          
+          # Get Go version
+          GO_VERSION=$(curl -s https://go.dev/VERSION?m=text | head -1 | sed 's/go//')
+          echo "go_version=$GO_VERSION" >> $GITHUB_OUTPUT
+          
+          # Get Alpine version
+          ALPINE_VERSION="3.20"
+          echo "alpine_version=$ALPINE_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Load previous versions (if exists)
+        id: previous
+        run: |
+          # Try to get previous nightly release
+          PREV_RELEASE=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases" | jq -r '[.[] | select(.tag_name | startswith("nightly-"))] | .[0]')
+          if [ "$PREV_RELEASE" != "null" ]; then
+            PREV_TRIVY=$(echo "$PREV_RELEASE" | jq -r '.body' | grep -oP 'Trivy.*?\|\s*\K[0-9.]+' || echo "unknown")
+            PREV_MALC=$(echo "$PREV_RELEASE" | jq -r '.body' | grep -oP 'Malcontent.*?\|\s*\K[0-9.]+' || echo "unknown")
+            PREV_MAGIKA=$(echo "$PREV_RELEASE" | jq -r '.body' | grep -oP 'Magika.*?\|\s*\K[0-9.]+' || echo "unknown")
+            echo "trivy=$PREV_TRIVY" >> $GITHUB_OUTPUT
+            echo "malcontent=$PREV_MALC" >> $GITHUB_OUTPUT
+            echo "magika=$PREV_MAGIKA" >> $GITHUB_OUTPUT
+          else
+            echo "trivy=none" >> $GITHUB_OUTPUT
+            echo "malcontent=none" >> $GITHUB_OUTPUT
+            echo "magika=none" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          cat << 'EOF' > release_notes.md
+          # 🔄 Nightly Build - ${{ steps.versions.outputs.build_date }}
+          
+          Auto-generated build with latest security tool versions.
+          
+          ## 📦 Docker Images
+          
+          ```bash
+          # Pull latest
+          docker pull ghcr.io/${{ github.repository }}:latest
+          docker pull ghcr.io/${{ github.repository }}:nightly
+          docker pull ghcr.io/${{ github.repository }}:nightly-${{ steps.versions.outputs.build_timestamp }}
+          ```
+          
+          ## 🛠️ Bundled Tool Versions
+          
+          | Tool | Version | Released | Status | Release Notes |
+          |------|---------|----------|--------|---------------|
+          | **Trivy** | ${{ steps.versions.outputs.trivy_version }} | ${{ steps.versions.outputs.trivy_date }} | ${{ steps.versions.outputs.trivy_version != steps.previous.outputs.trivy && '🆕 Updated' || '✅ Current' }} | [View](${{ steps.versions.outputs.trivy_url }}) |
+          | **Malcontent** | ${{ steps.versions.outputs.malcontent_version }} | ${{ steps.versions.outputs.malcontent_date }} | ${{ steps.versions.outputs.malcontent_version != steps.previous.outputs.malcontent && '🆕 Updated' || '✅ Current' }} | [View](${{ steps.versions.outputs.malcontent_url }}) |
+          | **Magika** | ${{ steps.versions.outputs.magika_version }} | - | ${{ steps.versions.outputs.magika_version != steps.previous.outputs.magika && '🆕 Updated' || '✅ Current' }} | [PyPI](https://pypi.org/project/magika/) |
+          
+          ## 🏗️ Build Environment
+          
+          | Component | Version |
+          |-----------|---------|
+          | Go | ${{ steps.versions.outputs.go_version }} |
+          | Alpine | ${{ steps.versions.outputs.alpine_version }} |
+          | Build Date | ${{ steps.versions.outputs.build_date }} |
+          | Commit | ${{ github.sha }} |
+          
+          ## 📋 Changes Since Last Nightly
+          
+          EOF
+          
+          # Add version change details
+          if [ "${{ steps.versions.outputs.trivy_version }}" != "${{ steps.previous.outputs.trivy }}" ]; then
+            echo "- **Trivy**: ${{ steps.previous.outputs.trivy }} → ${{ steps.versions.outputs.trivy_version }}" >> release_notes.md
+          fi
+          if [ "${{ steps.versions.outputs.malcontent_version }}" != "${{ steps.previous.outputs.malcontent }}" ]; then
+            echo "- **Malcontent**: ${{ steps.previous.outputs.malcontent }} → ${{ steps.versions.outputs.malcontent_version }}" >> release_notes.md
+          fi
+          if [ "${{ steps.versions.outputs.magika_version }}" != "${{ steps.previous.outputs.magika }}" ]; then
+            echo "- **Magika**: ${{ steps.previous.outputs.magika }} → ${{ steps.versions.outputs.magika_version }}" >> release_notes.md
+          fi
+          
+          # Check if any changes
+          if [ "${{ steps.versions.outputs.trivy_version }}" == "${{ steps.previous.outputs.trivy }}" ] && \
+             [ "${{ steps.versions.outputs.malcontent_version }}" == "${{ steps.previous.outputs.malcontent }}" ] && \
+             [ "${{ steps.versions.outputs.magika_version }}" == "${{ steps.previous.outputs.magika }}" ]; then
+            echo "_No tool version changes since last nightly build._" >> release_notes.md
+          fi
+          
+          cat << 'EOF' >> release_notes.md
+          
+          ## ⚠️ Notice
+          
+          This is an **automated nightly build** for testing and development.
+          For production use, please use a [stable release](https://github.com/${{ github.repository }}/releases?q=v&expanded=true).
+          
+          ---
+          
+          <details>
+          <summary>📊 Full Version Manifest (JSON)</summary>
+          
+          ```json
+          {
+            "build": {
+              "date": "${{ steps.versions.outputs.build_date }}",
+              "timestamp": "${{ steps.versions.outputs.build_timestamp }}",
+              "commit": "${{ github.sha }}"
+            },
+            "tools": {
+              "trivy": {
+                "version": "${{ steps.versions.outputs.trivy_version }}",
+                "released": "${{ steps.versions.outputs.trivy_date }}"
+              },
+              "malcontent": {
+                "version": "${{ steps.versions.outputs.malcontent_version }}",
+                "released": "${{ steps.versions.outputs.malcontent_date }}"
+              },
+              "magika": {
+                "version": "${{ steps.versions.outputs.magika_version }}"
+              }
+            },
+            "environment": {
+              "go": "${{ steps.versions.outputs.go_version }}",
+              "alpine": "${{ steps.versions.outputs.alpine_version }}"
+            }
+          }
+          ```
+          
+          </details>
+          EOF
+          
+          echo "Generated release notes:"
+          cat release_notes.md
+
+      - name: Build and push Docker images
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:nightly
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:nightly-${{ steps.versions.outputs.build_timestamp }}
+          build-args: |
+            TRIVY_VERSION=${{ steps.versions.outputs.trivy_version }}
+            MALCONTENT_VERSION=${{ steps.versions.outputs.malcontent_version }}
+            MAGIKA_VERSION=${{ steps.versions.outputs.magika_version }}
+          labels: |
+            org.opencontainers.image.title=vnaiscan
+            org.opencontainers.image.description=AI Agent Image Security Scanner (Nightly)
+            org.opencontainers.image.version=nightly-${{ steps.versions.outputs.build_timestamp }}
+            org.opencontainers.image.created=${{ steps.versions.outputs.build_date }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            dev.vnai.trivy.version=${{ steps.versions.outputs.trivy_version }}
+            dev.vnai.malcontent.version=${{ steps.versions.outputs.malcontent_version }}
+            dev.vnai.magika.version=${{ steps.versions.outputs.magika_version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create nightly release
+        if: github.event_name == 'schedule' || inputs.create_release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly-${{ steps.versions.outputs.build_timestamp }}
+          name: "Nightly Build ${{ steps.versions.outputs.build_date }}"
+          body_path: release_notes.md
+          prerelease: true
+          make_latest: false
+
+      - name: Cleanup old nightly releases
+        if: github.event_name == 'schedule'
+        run: |
+          # Keep only last 7 nightly releases
+          RELEASES=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases" | jq -r '[.[] | select(.tag_name | startswith("nightly-"))] | .[7:] | .[].id')
+          for id in $RELEASES; do
+            echo "Deleting old nightly release: $id"
+            curl -X DELETE -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/$id" || true
+          done
+
+      - name: Create build summary
+        run: |
+          cat release_notes.md >> $GITHUB_STEP_SUMMARY

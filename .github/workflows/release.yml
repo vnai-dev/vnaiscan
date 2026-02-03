@@ -1,0 +1,225 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+  # Build full bundles with all tools for Linux/macOS
+  build-bundles:
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: darwin
+            arch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          [ -z "$VERSION" ] && VERSION="${{ github.event.inputs.version }}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download vnaiscan from release
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          OS=${{ matrix.os }}
+          ARCH=${{ matrix.arch }}
+          
+          # Map OS names
+          if [ "$OS" = "darwin" ]; then
+            OSNAME="macos"
+          else
+            OSNAME="$OS"
+          fi
+          
+          mkdir -p bundle/bin
+          
+          # Download vnaiscan
+          curl -sSL "https://github.com/vnai-dev/vnaiscan/releases/download/v${VERSION}/vnaiscan_${VERSION}_${OSNAME}_${ARCH}.tar.gz" | \
+            tar -xz -C bundle/
+          mv bundle/vnaiscan bundle/bin/ 2>/dev/null || true
+
+      - name: Download Trivy
+        run: |
+          TRIVY_VERSION="0.69.0"
+          OS=${{ matrix.os }}
+          ARCH=${{ matrix.arch }}
+          
+          # Map to Trivy naming
+          if [ "$OS" = "linux" ]; then
+            TRIVY_OS="Linux"
+          else
+            TRIVY_OS="macOS"
+          fi
+          
+          if [ "$ARCH" = "amd64" ]; then
+            TRIVY_ARCH="64bit"
+          else
+            TRIVY_ARCH="ARM64"
+          fi
+          
+          curl -sSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_${TRIVY_OS}-${TRIVY_ARCH}.tar.gz" | \
+            tar -xz -C bundle/bin/ trivy
+
+      - name: Extract Malcontent (Linux only)
+        if: matrix.os == 'linux'
+        run: |
+          PLATFORM="linux/${{ matrix.arch }}"
+          docker pull --platform "$PLATFORM" cgr.dev/chainguard/malcontent:latest
+          CID=$(docker create --platform "$PLATFORM" cgr.dev/chainguard/malcontent:latest)
+          docker cp $CID:/usr/bin/mal bundle/bin/mal
+          mkdir -p bundle/lib
+          docker cp $CID:/usr/lib/libyara_x_capi.so.1 bundle/lib/ 2>/dev/null || true
+          docker rm $CID
+
+      - name: Build Magika
+        run: |
+          # Install Rust
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source ~/.cargo/env
+          
+          OS=${{ matrix.os }}
+          ARCH=${{ matrix.arch }}
+          
+          # Set target
+          if [ "$OS" = "linux" ] && [ "$ARCH" = "amd64" ]; then
+            TARGET="x86_64-unknown-linux-gnu"
+          elif [ "$OS" = "linux" ] && [ "$ARCH" = "arm64" ]; then
+            TARGET="aarch64-unknown-linux-gnu"
+            sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          elif [ "$OS" = "darwin" ] && [ "$ARCH" = "amd64" ]; then
+            TARGET="x86_64-apple-darwin"
+          elif [ "$OS" = "darwin" ] && [ "$ARCH" = "arm64" ]; then
+            TARGET="aarch64-apple-darwin"
+          fi
+          
+          rustup target add $TARGET || true
+          
+          # Build magika
+          cargo install --locked --target $TARGET magika-cli --root ./magika-build || \
+            cargo install --locked magika-cli --root ./magika-build
+          
+          cp ./magika-build/bin/magika bundle/bin/ 2>/dev/null || true
+        continue-on-error: true
+
+      - name: Create bundle tarball
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          OS=${{ matrix.os }}
+          ARCH=${{ matrix.arch }}
+          
+          BUNDLE_NAME="vnaiscan_${VERSION}_${OS}_${ARCH}_full"
+          mv bundle "$BUNDLE_NAME"
+          
+          # Add install script and docs
+          cp README.md LICENSE "$BUNDLE_NAME/"
+          cat > "$BUNDLE_NAME/install.sh" << 'EOF'
+          #!/bin/bash
+          set -e
+          INSTALL_DIR="${INSTALL_DIR:-/usr/local}"
+          echo "Installing to $INSTALL_DIR..."
+          sudo cp bin/* "$INSTALL_DIR/bin/"
+          [ -d lib ] && sudo cp lib/* "$INSTALL_DIR/lib/" && sudo ldconfig 2>/dev/null || true
+          echo "Done! Run: vnaiscan --version"
+          EOF
+          chmod +x "$BUNDLE_NAME/install.sh"
+          
+          tar -czvf "${BUNDLE_NAME}.tar.gz" "$BUNDLE_NAME"
+          sha256sum "${BUNDLE_NAME}.tar.gz" > "${BUNDLE_NAME}.tar.gz.sha256"
+
+      - name: Upload bundle to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *_full.tar.gz
+            *_full.tar.gz.sha256
+
+  # Publish npm package
+  publish-npm:
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Update version
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          cd npm
+          npm version $VERSION --no-git-tag-version
+
+      - name: Publish to npm
+        run: |
+          cd npm
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        continue-on-error: true

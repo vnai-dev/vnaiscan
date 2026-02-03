@@ -1,0 +1,167 @@
+# GoReleaser configuration for vnaiscan
+# https://goreleaser.com
+
+version: 2
+
+project_name: vnaiscan
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: vnaiscan
+    main: ./cmd/vnaiscan
+    binary: vnaiscan
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      # Windows ARM64 is less common, skip for now
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_
+      {{- if eq .Os "darwin" }}macos
+      {{- else }}{{ .Os }}{{ end }}_
+      {{- .Arch }}
+    files:
+      - README.md
+      - LICENSE
+      - scripts/install.sh
+
+checksum:
+  name_template: 'checksums.txt'
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - '^chore:'
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: vnai-dev
+    name: vnaiscan
+  draft: false
+  prerelease: auto
+  name_template: "v{{.Version}}"
+  header: |
+    ## vnaiscan v{{.Version}}
+    
+    AI Agent Image Security Scanner
+  footer: |
+    ## Installation
+    
+    ### Docker (Recommended - All tools included)
+    ```bash
+    docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+      ghcr.io/vnai-dev/vnaiscan scan <image:tag>
+    ```
+    
+    ### Install Script (Linux/macOS - All tools included)
+    ```bash
+    curl -sSL https://scan.vnai.dev/install.sh | sh
+    ```
+    
+    ### npx (Requires Docker)
+    ```bash
+    npx @vnai-dev/vnaiscan scan <image:tag>
+    ```
+    
+    ### Windows
+    Download the `.zip` file below and extract. Note: On Windows, only the vnaiscan binary is included.
+    For full scanning, use Docker Desktop or WSL2.
+    
+    ---
+    
+    **Full Changelog**: https://github.com/vnai-dev/vnaiscan/compare/{{ .PreviousTag }}...{{ .Tag }}
+
+# Docker images
+dockers:
+  - image_templates:
+      - "ghcr.io/vnai-dev/vnaiscan:{{ .Tag }}-amd64"
+    dockerfile: Dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.source=https://github.com/vnai-dev/vnaiscan"
+    goos: linux
+    goarch: amd64
+
+  - image_templates:
+      - "ghcr.io/vnai-dev/vnaiscan:{{ .Tag }}-arm64"
+    dockerfile: Dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.source=https://github.com/vnai-dev/vnaiscan"
+    goos: linux
+    goarch: arm64
+
+docker_manifests:
+  - name_template: "ghcr.io/vnai-dev/vnaiscan:{{ .Tag }}"
+    image_templates:
+      - "ghcr.io/vnai-dev/vnaiscan:{{ .Tag }}-amd64"
+      - "ghcr.io/vnai-dev/vnaiscan:{{ .Tag }}-arm64"
+  - name_template: "ghcr.io/vnai-dev/vnaiscan:latest"
+    image_templates:
+      - "ghcr.io/vnai-dev/vnaiscan:{{ .Tag }}-amd64"
+      - "ghcr.io/vnai-dev/vnaiscan:{{ .Tag }}-arm64"
+
+# Homebrew tap
+brews:
+  - name: vnaiscan
+    repository:
+      owner: vnai-dev
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://scan.vnai.dev"
+    description: "AI Agent Image Security Scanner"
+    license: "Apache-2.0"
+    dependencies:
+      - name: trivy
+    install: |
+      bin.install "vnaiscan"
+    caveats: |
+      vnaiscan requires additional tools for full functionality.
+      
+      For complete scanning, use Docker:
+        docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+          ghcr.io/vnai-dev/vnaiscan scan <image:tag>
+    test: |
+      system "#{bin}/vnaiscan", "--version"
+
+# npm package (just metadata, actual publish is separate)
+# The npm package is a Docker wrapper, see npm/ directory

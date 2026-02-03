@@ -1,0 +1,46 @@
+{
+  "name": "@vnai-dev/vnaiscan",
+  "version": "0.1.0",
+  "description": "AI Agent Image Security Scanner - Scan container images for CVEs, secrets, malware, and suspicious binaries",
+  "keywords": [
+    "security",
+    "scanner",
+    "container",
+    "docker",
+    "vulnerability",
+    "cve",
+    "trivy",
+    "malcontent",
+    "magika",
+    "ai-agent"
+  ],
+  "homepage": "https://scan.vnai.dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vnai-dev/vnaiscan.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vnai-dev/vnaiscan/issues"
+  },
+  "license": "Apache-2.0",
+  "author": "vnai.dev",
+  "bin": {
+    "vnaiscan": "./bin/vnaiscan.js"
+  },
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
+}
